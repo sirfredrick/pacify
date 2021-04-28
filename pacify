@@ -1,0 +1,113 @@
+#!/bin/sh
+
+# Pacify - Shell script that extracts YouTube video audio and condenses it for passive language listening
+# Copyright (C) 2021 Sir Fredrick
+#
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation; either version 2 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License along
+#   with this program; if not, write to the Free Software Foundation, Inc.,
+#   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# pacify [file/directory name] [YouTube video ID] [subtitle language ID]
+# ex. ./pacify SuperTuxCart uWO5DISzMUA es
+# POSIX compliant*
+# *Requires youtube-dl (python), ffmpeg, and dos2unix to be installed and in the PATH.
+# This script is as portable as python is which is moderately portable. 
+# Tested on Ubuntu 20.04, Alpine 3.13.5, FreeBSD 12.2, and OpenBSD 6.8.
+
+download_video() {
+    youtube-dl -i --extract-audio --audio-format opus --audio-quality 0 -o $PACIFILE.opus $YTURL
+    youtube-dl --write-auto-sub --sub-lang $LANG --skip-download -o $PACIFILE $YTURL
+}
+
+get_srt() {
+    if [ -e $PACIFILE.srt ]
+    then
+        echo "Using already existing file $PACIFILE.srt"
+    else
+        ffmpeg -i $PACIFILE*.vtt $PACIFILE-temp.srt
+        rm $PACIFILE*.vtt
+        # Remove \r characters that ffmpeg inserts for some reason
+        dos2unix $PACIFILE-temp.srt
+        # Delete blank lines after srt header
+        sed '/^[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]],[[:digit:]][[:digit:]][[:digit:]][[:space:]]-->[[:space:]][[:digit:]][[:digit:]]:[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]],[[:digit:]][[:digit:]][[:digit:]]/ {n;/^$/d;}' $PACIFILE-temp.srt > $PACIFILE.srt	
+        rm ./$PACIFILE-temp.srt
+    fi
+}
+
+clean_srt() {
+    # Remove [] text from subtitles
+    sed '/^[[:space:]]*\[.*\][[:space:]]*$/d' $PACIFILE.srt > $PACIFILE-temp.srt
+    # Remove empty subtitles
+    sed '/^[[:digit:]][[:digit:]]*$/ {N; /[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]],[[:digit:]][[:digit:]][[:digit:]][[:space:]]-->[[:space:]][[:digit:]][[:digit:]]:[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]],[[:digit:]][[:digit:]][[:digit:]]/ {N; /[[:space:]]$/d;};}' $PACIFILE-temp.srt > $PACIFILE.srt
+    mv $PACIFILE-temp.srt $PACIFILE.srt
+    rm $PACIFILE-temp.srt
+    # Export timings to new file
+    sed -n '/[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]],[[:digit:]][[:digit:]][[:digit:]][[:space:]]-->[[:space:]][[:digit:]][[:digit:]]:[[:digit:]][[:digit:]]:[[:digit:]][[:digit:]],[[:digit:]][[:digit:]][[:digit:]]/ {s/-->//; s/,[[:digit:]][[:digit:]][[:digit:]]//gp;}' $PACIFILE.srt > times-temp.txt
+    sed '/./=' times-temp.txt | paste -d ' ' - - > times.txt
+}
+
+clean_timings() {
+    # Combine adjacent timings and convert to mp3
+    p="00:00:00"
+    q="00:00:00"
+	while IFS=' ' read -r f s t
+	do 
+		echo "$s:$t:$p:$q" > temp.txt	
+		while IFS=':' read -r a b c x y z i j k l m n
+		do	
+			if [ $a -le $x -a $b -le $y -a $c -lt $z ]
+			then
+				if [ $a -le $l -a $b -le $m -a $c -le $n ]
+				then
+					p="$i:$j:$k"
+					q="$x:$y:$z"
+				else
+					ffmpeg -i "${PACIFILE}.opus" -ss $p -to $q ./${PACIFILE}_tracks/$f.mp3
+					echo "$f $p $q"
+					p="$s"
+					q="$t"
+				fi
+			fi
+		done <temp.txt	
+	done <times.txt
+	echo "final $p $q"
+	ffmpeg -i "${PACIFILE}.opus" -ss $p -to $q ./${PACIFILE}_tracks/final.mp3
+}
+
+mkdir ./$1
+cd $1
+# PACIFILE=file/directory name, YTURL=video id, LANG=language code for subtitles (en, es, etc.)
+export PACIFILE=$1
+export YTURL=$2
+export LANG=$3
+
+download_video
+get_srt
+clean_srt
+
+mkdir $1_tracks
+
+clean_timings > times-temp.txt 	
+cp times-temp.txt times.txt
+rm times-temp.txt
+rm temp.txt
+
+cd $1_tracks
+# print mp3 files in vertical order and append file keyword to front
+find `ls -tr *.mp3` | sed 's/.*/file &/' > list.txt
+ffmpeg -f concat -i list.txt -c copy ../$PACIFILE-final.mp3
+cd ../
+mv ./*-final.mp3 ../
+rm -rf ./$1_tracks
+cd ../
+rm -rf ./$PACIFILE
